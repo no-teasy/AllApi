@@ -1,5 +1,6 @@
 import BaseService from './BaseService.js';
 import db from '../models/database.js';
+import { getProviders, getProviderKeys, getModelMappings } from '../models/database.js';
 
 // 前缀缓存亲和性 - 基于 model 前缀的渠道匹配缓存
 const prefixCache = new Map();
@@ -11,111 +12,61 @@ class ProxyService extends BaseService {
     this.db = db;
   }
 
-  // 初始化表
-  initTables() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS providers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE,
-        base_url TEXT NOT NULL,
-        api_type TEXT DEFAULT 'openai',
-        status TEXT DEFAULT 'active',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-
-      CREATE TABLE IF NOT EXISTS provider_keys (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        provider_id INTEGER NOT NULL,
-        api_key TEXT NOT NULL,
-        weight INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'active',
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS model_mappings (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        provider_id INTEGER NOT NULL,
-        model_name TEXT NOT NULL,
-        mapped_model TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (provider_id) REFERENCES providers(id) ON DELETE CASCADE,
-        UNIQUE(provider_id, model_name)
-      );
-    `);
-  }
-
-  // 获取所有活跃渠道
+  // 获取所有启用渠道
   getActiveProviders() {
-    this.initTables();
-    return this.db.prepare(`
-      SELECT p.*, 
-        (SELECT api_key FROM provider_keys WHERE provider_id = p.id AND status = 'active' LIMIT 1) as api_key
-      FROM providers p 
-      WHERE p.status = 'active'
-    `).all();
+    return getProviders(1); // 1 = enabled
   }
 
-  // 获取渠道的所有 Key（带权重）
-  getProviderKeys(providerId) {
-    return this.db.prepare(`
-      SELECT * FROM provider_keys 
-      WHERE provider_id = ? AND status = 'active'
-      ORDER BY weight DESC
-    `).all(providerId);
-  }
-
-  // 根据 model 前缀查找映射的渠道
-  findProviderByModelPrefix(model) {
+  // 根据 model 查找对应渠道和映射
+  findProviderByModel(model) {
     // 检查缓存
     const now = Date.now();
     if (prefixCache.has(model)) {
       const cached = prefixCache.get(model);
       if (now - cached.timestamp < PREFIX_CACHE_TTL) {
-        return cached.provider;
+        return cached;
       }
       prefixCache.delete(model);
     }
 
-    this.initTables();
+    // 查找模型映射
+    const mappings = getModelMappings();
+    const providers = getProviders(1);
 
-    // 查找匹配的模型映射
-    const mapping = this.db.prepare(`
-      SELECT mm.*, p.base_url, p.api_type,
-        (SELECT api_key FROM provider_keys WHERE provider_id = p.id AND status = 'active' LIMIT 1) as api_key
-      FROM model_mappings mm
-      JOIN providers p ON mm.provider_id = p.id
-      WHERE mm.model_name = ? AND p.status = 'active'
-    `).get(model);
+    // 建立 provider 映射
+    const providerMap = new Map();
+    for (const p of providers) {
+      providerMap.set(p.id, p);
+    }
 
-    if (mapping) {
-      // 缓存结果
-      prefixCache.set(model, { provider: mapping, timestamp: now });
-      return mapping;
+    // 精确匹配
+    for (const mapping of mappings) {
+      if (mapping.user_model === model) {
+        const provider = providerMap.get(mapping.provider_id);
+        if (provider) {
+          const result = { provider, mapping };
+          prefixCache.set(model, { ...result, timestamp: now });
+          return result;
+        }
+      }
     }
 
     // 前缀匹配 - 查找最长匹配的前缀
-    const allMappings = this.db.prepare(`
-      SELECT mm.*, p.base_url, p.api_type,
-        (SELECT api_key FROM provider_keys WHERE provider_id = p.id AND status = 'active' LIMIT 1) as api_key
-      FROM model_mappings mm
-      JOIN providers p ON mm.provider_id = p.id
-      WHERE p.status = 'active'
-    `).all();
-
     let bestMatch = null;
     let bestPrefixLength = 0;
 
-    for (const m of allMappings) {
-      if (model.startsWith(m.model_name) && m.model_name.length > bestPrefixLength) {
-        bestMatch = m;
-        bestPrefixLength = m.model_name.length;
+    for (const mapping of mappings) {
+      if (model.startsWith(mapping.user_model) && mapping.user_model.length > bestPrefixLength) {
+        const provider = providerMap.get(mapping.provider_id);
+        if (provider) {
+          bestMatch = { provider, mapping };
+          bestPrefixLength = mapping.user_model.length;
+        }
       }
     }
 
     if (bestMatch) {
-      prefixCache.set(model, { provider: bestMatch, timestamp: now });
+      prefixCache.set(model, { ...bestMatch, timestamp: now });
     }
 
     return bestMatch;
@@ -137,92 +88,60 @@ class ProxyService extends BaseService {
     return keys[0];
   }
 
-  // 更新统计
-  updateStats(providerId, tokens = 0, cost = 0) {
-    try {
-      this.db.prepare(`
-        INSERT INTO stats (provider_id, date, request_count, token_count, cost)
-        VALUES (?, date('now'), 1, ?, ?)
-        ON CONFLICT(provider_id, date) DO UPDATE SET
-          request_count = request_count + 1,
-          token_count = token_count + ?,
-          cost = cost + ?
-      `).run(providerId, tokens, cost, tokens, cost);
-    } catch (error) {
-      console.error('Failed to update stats:', error);
-    }
-  }
-
   // 处理聊天完成请求
   async handleChatCompletion(req, res) {
     try {
-      this.initTables();
-
       const { model, stream } = req.body;
       const providerHeader = req.headers['x-all-api-provider'];
 
       let provider;
-      let apiKey;
-      let baseUrl;
       let mappedModel = model;
 
       // 优先使用 Header 指定的渠道
       if (providerHeader) {
-        const p = this.db.prepare(`
-          SELECT p.*,
-            (SELECT api_key FROM provider_keys WHERE provider_id = p.id AND status = 'active' LIMIT 1) as api_key
-          FROM providers p WHERE p.name = ? OR p.id = ?
-        `).get(providerHeader, providerHeader);
+        const providers = getProviders(1);
+        provider = providers.find(p => p.name === providerHeader || String(p.id) === String(providerHeader));
 
-        if (!p) {
-          return res.status(404).json({ error: 'Provider not found' });
+        if (!provider) {
+          return res.status(404).json({ error: 'Provider not found or not enabled' });
         }
-        provider = p;
-        apiKey = p.api_key;
-        baseUrl = p.base_url;
 
-        // 检查是否有模型映射
-        const mapping = this.db.prepare(`
-          SELECT mapped_model FROM model_mappings 
-          WHERE provider_id = ? AND model_name = ?
-        `).get(p.id, model);
+        // 查找该渠道的模型映射
+        const mappings = getModelMappings(provider.id);
+        const mapping = mappings.find(m => m.user_model === model);
         if (mapping) {
-          mappedModel = mapping.mapped_model;
+          mappedModel = mapping.upstream_model;
         }
       } else {
         // 使用前缀缓存亲和性查找渠道
-        provider = this.findProviderByModelPrefix(model);
+        const match = this.findProviderByModel(model);
 
-        if (!provider) {
-          // 尝试获取默认渠道
-          const providers = this.getActiveProviders();
+        if (!match) {
+          const providers = getProviders(1);
           if (providers.length === 0) {
             return res.status(404).json({ error: 'No active providers found' });
           }
           provider = providers[0];
-        }
-
-        apiKey = provider.api_key;
-        baseUrl = provider.base_url;
-        mappedModel = provider.mapped_model || model;
-
-        // 如果没有 api_key，使用轮询选择
-        if (!apiKey) {
-          const keys = this.getProviderKeys(provider.id);
-          const selectedKey = this.selectKeyByWeight(keys);
-          if (!selectedKey) {
-            return res.status(500).json({ error: 'No available API keys' });
-          }
-          apiKey = selectedKey.api_key;
+        } else {
+          provider = match.provider;
+          mappedModel = match.mapping.upstream_model || model;
         }
       }
 
-      if (!apiKey) {
-        return res.status(500).json({ error: 'No API key available' });
+      // 获取渠道的 Keys
+      const keys = getProviderKeys(provider.id).filter(k => k.enabled === 1);
+      if (keys.length === 0) {
+        return res.status(500).json({ error: 'No available API keys for this provider' });
+      }
+
+      // 轮询选择 Key
+      const selectedKey = this.selectKeyByWeight(keys);
+      if (!selectedKey) {
+        return res.status(500).json({ error: 'Failed to select API key' });
       }
 
       // 构建目标 URL
-      const targetUrl = `${baseUrl.replace(/\/$/, '')}/v1/chat/completions`;
+      const targetUrl = `${provider.base_url.replace(/\/$/, '')}/chat/completions`;
 
       // 准备请求体
       const requestBody = {
@@ -232,11 +151,11 @@ class ProxyService extends BaseService {
 
       // 如果是流式请求
       if (stream) {
-        return this.handleStreamRequest(req, res, targetUrl, apiKey, provider.id, requestBody);
+        return this.handleStreamRequest(req, res, targetUrl, selectedKey.key, provider.id, requestBody, model);
       }
 
       // 非流式请求
-      const response = await this.makeRequest(targetUrl, apiKey, requestBody);
+      const response = await this.makeRequest(targetUrl, selectedKey.key, requestBody);
 
       // 更新统计
       const tokens = response.usage ? response.usage.total_tokens || 0 : 0;
@@ -253,10 +172,10 @@ class ProxyService extends BaseService {
   }
 
   // 处理流式请求
-  async handleStreamRequest(req, res, targetUrl, apiKey, providerId, requestBody) {
+  async handleStreamRequest(req, res, targetUrl, apiKey, providerId, requestBody, originalModel) {
     try {
       const { fetch } = await import('undici');
-      
+
       const response = await fetch(targetUrl, {
         method: 'POST',
         headers: {
@@ -264,7 +183,7 @@ class ProxyService extends BaseService {
           'Authorization': `Bearer ${apiKey}`
         },
         body: JSON.stringify(requestBody),
-        dispatcher: new (await import('undici')).Agent({ 
+        dispatcher: new (await import('undici')).Agent({
           connect: { timeout: 60000 }
         })
       });
@@ -291,7 +210,7 @@ class ProxyService extends BaseService {
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6);
-            
+
             if (data === '[DONE]') {
               res.write('data: [DONE]\n\n');
               continue;
@@ -299,10 +218,9 @@ class ProxyService extends BaseService {
 
             try {
               const parsed = JSON.parse(data);
-              
+
               // 计算 token
               if (parsed.choices && parsed.choices[0] && parsed.choices[0].delta && parsed.choices[0].delta.content) {
-                // 粗略估算：每个中文字符约 2 tokens，英文约 0.75 tokens
                 const content = parsed.choices[0].delta.content;
                 const charCount = content.length;
                 const estimatedTokens = Math.ceil(charCount * (content.match(/[\u4e00-\u9fff]/) ? 0.5 : 0.75));
@@ -311,7 +229,7 @@ class ProxyService extends BaseService {
 
               // 流式传输时修改 model 名称
               if (isFirstChunk && parsed.model) {
-                parsed.model = requestBody.model;
+                parsed.model = originalModel;
                 isFirstChunk = false;
               }
 
@@ -340,7 +258,7 @@ class ProxyService extends BaseService {
   // 发送 HTTP 请求
   async makeRequest(url, apiKey, body) {
     const { fetch } = await import('undici');
-    
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -348,7 +266,7 @@ class ProxyService extends BaseService {
         'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify(body),
-      dispatcher: new (await import('undici')).Agent({ 
+      dispatcher: new (await import('undici')).Agent({
         connect: { timeout: 60000 }
       })
     });
@@ -361,31 +279,38 @@ class ProxyService extends BaseService {
     return response.json();
   }
 
+  // 更新统计
+  updateStats(providerId, tokens = 0, cost = 0) {
+    try {
+      this.db.prepare(`
+        INSERT INTO usage_logs (provider_id, model, input_tokens, output_tokens, cost)
+        VALUES (?, 'unknown', ?, 0, ?)
+      `).run(providerId, tokens, cost);
+    } catch (error) {
+      console.error('Failed to update stats:', error);
+    }
+  }
+
   // 获取模型列表
   async handleModels(req, res) {
     try {
-      this.initTables();
-
       const providerHeader = req.headers['x-all-api-provider'];
 
       if (providerHeader) {
-        const p = this.db.prepare(`
-          SELECT p.*,
-            (SELECT api_key FROM provider_keys WHERE provider_id = p.id AND status = 'active' LIMIT 1) as api_key
-          FROM providers p WHERE p.name = ? OR p.id = ?
-        `).get(providerHeader, providerHeader);
+        const providers = getProviders(1);
+        const provider = providers.find(p => p.name === providerHeader || String(p.id) === String(providerHeader));
 
-        if (!p) {
+        if (!provider) {
           return res.status(404).json({ error: 'Provider not found' });
         }
 
         // 从目标渠道获取模型列表
-        const targetUrl = `${p.base_url.replace(/\/$/, '')}/v1/models`;
+        const targetUrl = `${provider.base_url.replace(/\/$/, '')}/models`;
         const { fetch } = await import('undici');
-        
+
         const response = await fetch(targetUrl, {
           headers: {
-            'Authorization': `Bearer ${p.api_key}`
+            'Authorization': `Bearer ${provider.api_key}`
           }
         });
 
@@ -396,16 +321,29 @@ class ProxyService extends BaseService {
       }
 
       // 返回所有映射的模型
-      const mappings = this.db.prepare(`
-        SELECT DISTINCT mm.model_name as id, mm.model_name as name, p.name as provider
-        FROM model_mappings mm
-        JOIN providers p ON mm.provider_id = p.id
-        WHERE p.status = 'active'
-      `).all();
+      const mappings = getModelMappings();
+      const providers = getProviders(1);
+
+      const providerMap = new Map();
+      for (const p of providers) {
+        providerMap.set(p.id, p);
+      }
+
+      const models = [];
+      for (const m of mappings) {
+        const provider = providerMap.get(m.provider_id);
+        if (provider) {
+          models.push({
+            id: m.user_model,
+            name: m.user_model,
+            provider: provider.name
+          });
+        }
+      }
 
       return res.json({
         object: 'list',
-        data: mappings
+        data: models
       });
 
     } catch (error) {
