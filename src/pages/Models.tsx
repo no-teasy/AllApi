@@ -17,75 +17,15 @@ const Models: React.FC = () => {
   const [showPriceModal, setShowPriceModal] = useState(false);
   const [selectedModel, setSelectedModel] = useState<Model | null>(null);
 
-  // Mock data
-  const models: Model[] = [
-    {
-      id: '1',
-      name: 'GPT-4',
-      provider: 'OpenAI',
-      icon: 'gpt4',
-      inputPrice: 0.03,
-      outputPrice: 0.06,
-      enabled: true,
-      createdAt: '2024-01-15T08:00:00Z',
-      updatedAt: '2024-06-20T10:30:00Z',
-    },
-    {
-      id: '2',
-      name: 'GPT-4-Turbo',
-      provider: 'OpenAI',
-      icon: 'gpt4',
-      inputPrice: 0.01,
-      outputPrice: 0.03,
-      enabled: true,
-      createdAt: '2024-02-10T09:00:00Z',
-      updatedAt: '2024-06-18T14:20:00Z',
-    },
-    {
-      id: '3',
-      name: 'Claude-3-Opus',
-      provider: 'Anthropic',
-      icon: 'claude',
-      inputPrice: 0.015,
-      outputPrice: 0.075,
-      enabled: true,
-      createdAt: '2024-02-15T10:00:00Z',
-      updatedAt: '2024-06-19T11:45:00Z',
-    },
-    {
-      id: '4',
-      name: 'Claude-3-Sonnet',
-      provider: 'Anthropic',
-      icon: 'claude',
-      inputPrice: 0.003,
-      outputPrice: 0.015,
-      enabled: true,
-      createdAt: '2024-02-15T10:00:00Z',
-      updatedAt: '2024-06-17T09:30:00Z',
-    },
-    {
-      id: '5',
-      name: 'DeepSeek-V2',
-      provider: 'DeepSeek',
-      icon: 'deepseek',
-      inputPrice: 0.001,
-      outputPrice: 0.002,
-      enabled: true,
-      createdAt: '2024-04-20T11:00:00Z',
-      updatedAt: '2024-06-10T08:15:00Z',
-    },
-    {
-      id: '6',
-      name: 'Gemini-Pro',
-      provider: 'Google',
-      icon: 'gemini',
-      inputPrice: 0.00125,
-      outputPrice: 0.005,
-      enabled: false,
-      createdAt: '2024-05-12T14:30:00Z',
-      updatedAt: '2024-06-08T12:00:00Z',
-    },
-  ];
+  // Models list - user added
+  const [models, setModels] = useState<Model[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newModel, setNewModel] = useState({
+    name: '',
+    provider: '',
+    inputPrice: 0,
+    outputPrice: 0,
+  });
 
   const filteredModels = models.filter(
     (m) =>
@@ -115,6 +55,31 @@ const Models: React.FC = () => {
     setShowPriceModal(true);
   };
 
+  const handleAddModel = () => {
+    if (!newModel.name || !newModel.provider) return;
+    const model: Model = {
+      id: crypto.randomUUID(),
+      name: newModel.name,
+      provider: newModel.provider,
+      inputPrice: newModel.inputPrice,
+      outputPrice: newModel.outputPrice,
+      enabled: true,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    setModels([...models, model]);
+    setNewModel({ name: '', provider: '', inputPrice: 0, outputPrice: 0 });
+    setShowAddModal(false);
+  };
+
+  const handleToggleModel = (id: string) => {
+    setModels(models.map(m => m.id === id ? { ...m, enabled: !m.enabled } : m));
+  };
+
+  const handleDeleteModel = (id: string) => {
+    setModels(models.filter(m => m.id !== id));
+  };
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -123,7 +88,10 @@ const Models: React.FC = () => {
           <h1 className="text-2xl font-bold text-gray-900">模型管理</h1>
           <p className="text-gray-500 mt-1">配置和管理 AI 模型定价</p>
         </div>
-        <button className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl font-medium hover:shadow-lg hover:shadow-blue-500/25 transition-all">
+        <button
+          onClick={() => setShowAddModal(true)}
+          className="inline-flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-xl font-medium hover:shadow-lg hover:shadow-blue-500/25 transition-all"
+        >
           <Plus size={20} />
           添加模型
         </button>
@@ -192,7 +160,10 @@ const Models: React.FC = () => {
                     </div>
                   </td>
                   <td className="px-6 py-4 text-center">
-                    <button className="inline-flex items-center gap-1">
+                    <button
+                      onClick={() => handleToggleModel(model.id)}
+                      className="inline-flex items-center gap-1"
+                    >
                       {model.enabled ? (
                         <>
                           <ToggleRight size={20} className="text-green-500" />
@@ -218,7 +189,10 @@ const Models: React.FC = () => {
                       <button className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-500 hover:text-blue-500">
                         <Edit size={16} />
                       </button>
-                      <button className="p-2 rounded-lg hover:bg-red-50 transition-colors text-gray-500 hover:text-red-500">
+                      <button
+                        onClick={() => handleDeleteModel(model.id)}
+                        className="p-2 rounded-lg hover:bg-red-50 transition-colors text-gray-500 hover:text-red-500"
+                      >
                         <Trash2 size={16} />
                       </button>
                     </div>
@@ -229,7 +203,16 @@ const Models: React.FC = () => {
           </table>
         </div>
 
-        {filteredModels.length === 0 && (
+        {filteredModels.length === 0 && !searchQuery && (
+          <div className="text-center py-12">
+            <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
+              <Box className="text-gray-400" size={24} />
+            </div>
+            <p className="text-gray-500 mb-4">暂无模型，点击上方按钮添加</p>
+          </div>
+        )}
+
+        {filteredModels.length === 0 && searchQuery && (
           <div className="text-center py-12">
             <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-gray-100 flex items-center justify-center">
               <Search className="text-gray-400" size={24} />
@@ -286,6 +269,78 @@ const Models: React.FC = () => {
                 className="px-4 py-2 bg-blue-500 text-white font-medium rounded-xl hover:bg-blue-600 transition-colors"
               >
                 保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add Model Modal */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <h3 className="text-lg font-semibold text-gray-900 mb-4">添加模型</h3>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">模型名称</label>
+                <input
+                  type="text"
+                  value={newModel.name}
+                  onChange={(e) => setNewModel({ ...newModel, name: e.target.value })}
+                  placeholder="例如：GPT-4"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">提供商</label>
+                <input
+                  type="text"
+                  value={newModel.provider}
+                  onChange={(e) => setNewModel({ ...newModel, provider: e.target.value })}
+                  placeholder="例如：OpenAI"
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  输入价格 ($/1K tokens)
+                </label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={newModel.inputPrice}
+                  onChange={(e) => setNewModel({ ...newModel, inputPrice: Number(e.target.value) })}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  输出价格 ($/1K tokens)
+                </label>
+                <input
+                  type="number"
+                  step="0.0001"
+                  value={newModel.outputPrice}
+                  onChange={(e) => setNewModel({ ...newModel, outputPrice: Number(e.target.value) })}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none"
+                />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-3 mt-6">
+              <button
+                onClick={() => {
+                  setShowAddModal(false);
+                  setNewModel({ name: '', provider: '', inputPrice: 0, outputPrice: 0 });
+                }}
+                className="px-4 py-2 text-gray-700 font-medium hover:bg-gray-100 rounded-xl transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={handleAddModel}
+                className="px-4 py-2 bg-blue-500 text-white font-medium rounded-xl hover:bg-blue-600 transition-colors"
+              >
+                添加
               </button>
             </div>
           </div>

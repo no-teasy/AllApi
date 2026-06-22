@@ -24,7 +24,7 @@ const ProviderForm: React.FC = () => {
     baseURL: '',
     keys: [{ id: crypto.randomUUID(), key: '', enabled: true }],
     models: [{ remoteModel: '', localModel: '' }],
-    weight: 100,
+    weight: 1,
     enabled: true,
   });
 
@@ -224,19 +224,14 @@ const ProviderForm: React.FC = () => {
                 <label className="block text-sm font-medium text-gray-700 mb-2">
                   权重 (负载均衡)
                 </label>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="range"
-                    min="1"
-                    max="100"
-                    value={formData.weight || 100}
-                    onChange={(e) => setFormData({ ...formData, weight: Number(e.target.value) })}
-                    className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-500"
-                  />
-                  <span className="w-16 text-center font-medium text-gray-900">
-                    {formData.weight}%
-                  </span>
-                </div>
+                <input
+                  type="number"
+                  min="1"
+                  value={formData.weight || 1}
+                  onChange={(e) => setFormData({ ...formData, weight: Number(e.target.value) })}
+                  className="w-32 px-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 outline-none transition-all"
+                />
+                <p className="text-sm text-gray-500 mt-1">默认为 1，数值越大权重越高</p>
               </div>
 
               <div className="flex items-center gap-3">
